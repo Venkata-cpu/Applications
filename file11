@@ -1,4 +1,3 @@
-
 [ec2-user@ip-172-31-19-75 ~]$ cd My_Git/
 [ec2-user@ip-172-31-19-75 My_Git]$ ll
 total 0
@@ -52,11 +51,11 @@ total 4
 [ec2-user@ip-172-31-19-75 My_Git]$ git branch
 * master
 [ec2-user@ip-172-31-19-75 My_Git]$ git branch -M master
-[ec2-user@ip-172-31-19-75 My_Git]$ git remote add origin https://Venkata-cpu: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@github.com/Venkata-cpu/Applications.git
+[ec2-user@ip-172-31-19-75 My_Git]$ git remote add origin https://Venkata-cpu:ghp--------Z0JC@github.com/Venkata-cpu/Applications.git
 [ec2-user@ip-172-31-19-75 My_Git]$ 
-[ec2-user@ip-172-31-19-75 My_Git]$ git remote add origin https://Venkata-cpu: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@github.com/Venkata-cpu/Applications.git
+[ec2-user@ip-172-31-19-75 My_Git]$ git remote add origin https://Venkata-cpu:ghp--------Z0JC@github.com/Venkata-cpu/Applications.git
 error: remote origin already exists.
-[ec2-user@ip-172-31-19-75 My_Git]$ git remote set-url origin https://Venkata-cpu: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@github.com/Venkata-cpu/Applications.git
+[ec2-user@ip-172-31-19-75 My_Git]$ git remote set-url origin https://Venkata-cpu:ghp--------Z0JC@github.com/Venkata-cpu/Applications.git
 [ec2-user@ip-172-31-19-75 My_Git]$ 
 [ec2-user@ip-172-31-19-75 My_Git]$ 
 [ec2-user@ip-172-31-19-75 My_Git]$ 
@@ -70,5 +69,3 @@ Writing objects: 100% (3/3), 238 bytes | 238.00 KiB/s, done.
 Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 To https://github.com/Venkata-cpu/Applications.git
 
-
-4
