@@ -1,0 +1,19 @@
+kubectl apply -f mysql-secret.yaml
+
+kubectl apply -f mysql-deployment.yaml  --_all_-- with pvc volume.
+
+kubectl apply -f mysql-service.yaml
+
+
+for temprovary storage
+
+kubectl apply -f mysql-deployment-ephemeral.yaml
+
+kubectl apply -f mysql-service.yaml
+
+check 
+
+kubectl get deployments
+kubectl get pods
+
+kubectl get svc mysql-service
