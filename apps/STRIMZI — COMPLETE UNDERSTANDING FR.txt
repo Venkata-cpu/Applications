@@ -1,0 +1,750 @@
+STRIMZI — COMPLETE UNDERSTANDING FROM SCRATCH
+═══════════════════════════════════════════════════════════════
+
+  FIRST — UNDERSTAND KUBERNETES BASICS
+  ══════════════════════════════════════
+
+  Normal World (Server):          Kubernetes World:
+  ──────────────────────          ─────────────────
+  Install app on server     →     Deploy app as Pod
+  Config in /etc/app/       →     Config in ConfigMap/Secret
+  systemctl start app       →     kubectl apply -f app.yaml
+  app runs on port 8080     →     Service exposes the port
+  multiple servers          →     multiple Pods
+  load balancer             →     Service (ClusterIP/NodePort)
+
+
+  WHAT IS AN OPERATOR?
+  ══════════════════════════════════════════════════════════════
+
+  Normal Way (you manage everything manually):
+  ┌────────────────────────────────────────────┐
+  │  You SSH → install kafka → edit config     │
+  │  You SSH → start kafka → check status      │
+  │  You SSH → upgrade kafka → restart         │
+  │  You SSH → add broker → update config      │
+  │  (lots of manual work!)                    │
+  └────────────────────────────────────────────┘
+
+  Operator Way (operator manages everything):
+  ┌────────────────────────────────────────────┐
+  │  You write yaml → kubectl apply            │
+  │  Operator reads yaml                       │
+  │  Operator does everything automatically:   │
+  │  → installs kafka                          │
+  │  → creates config                          │
+  │  → starts brokers                          │
+  │  → handles upgrades                        │
+  │  → handles failures/restarts               │
+  │  → scales up/down                          │
+  └────────────────────────────────────────────┘
+
+  Strimzi IS the Kafka Operator for Kubernetes!
+
+
+  HOW STRIMZI IS DEPLOYED (your mat_ansible flow)
+  ══════════════════════════════════════════════════════════════
+
+  STEP 1 — Ansible deploys Strimzi Operator
+  ──────────────────────────────────────────
+  mat_ansible/roles/kubernetes/streaming/kafka
+       │
+       │  installs:
+       ▼
+  strimzi-cluster-operator pod (blp25082080)
+  → this is just a pod watching for Kafka yamls
+  → does nothing until you give it a Kafka CR
+
+
+  STEP 2 — Ansible applies Kafka CR (Custom Resource)
+  ─────────────────────────────────────────────────────
+  A CR (Custom Resource) is just a yaml that describes
+  what you WANT. Strimzi reads it and makes it happen.
+
+  Example Kafka CR (simplified):
+  ┌────────────────────────────────────────────────────┐
+  │  apiVersion: kafka.strimzi.io/v1beta2              │
+  │  kind: Kafka                          ← type       │
+  │  metadata:                                         │
+  │    name: barista-kafka-cluster        ← your name  │
+  │    namespace: kafka                                │
+  │  spec:                                             │
+  │    kafka:                                          │
+  │      replicas: 3                      ← 3 brokers  │
+  │      listeners:                                    │
+  │        - name: internal                            │
+  │          port: 9092                                │
+  │          type: internal                            │
+  │          tls: false                                │
+  │        - name: external                            │
+  │          port: 9094                                │
+  │          type: nodeport               ← nodeport   │
+  │          tls: false                                │
+  │      storage:                                      │
+  │        type: persistent-claim                      │
+  │        size: 100Gi                                 │
+  │    zookeeper:                                      │
+  │      replicas: 3  (or KRaft mode - no zookeeper)  │
+  └────────────────────────────────────────────────────┘
+
+  STEP 3 — Strimzi reads CR and creates everything
+  ─────────────────────────────────────────────────
+  Strimzi Operator
+       │
+       ├──▶ creates broker pods (pool-0, pool-1, pool-2)
+       ├──▶ creates controller pods (pool-3, pool-4, pool-5)
+       ├──▶ creates entity-operator pod
+       ├──▶ creates services (ClusterIP, NodePort)
+       ├──▶ generates /tmp/strimzi.properties
+       ├──▶ creates secrets (TLS certs, passwords)
+       └──▶ creates configmaps
+
+
+  HOW TO UPDATE KAFKA CONFIG
+  ══════════════════════════════════════════════════════════════
+
+  Normal Server Way:             Strimzi Way:
+  ──────────────────             ────────────
+  SSH to server            →     edit Kafka CR yaml
+  vi /etc/kafka/server.    →     kubectl edit kafka barista-kafka-cluster -n kafka
+  properties                     OR
+  systemctl restart kafka  →     kubectl apply -f kafka.yaml
+                                 Strimzi does rolling restart automatically!
+
+  Example — change broker replicas from 3 to 4:
+  ┌────────────────────────────────────────────┐
+  │  kubectl edit kafka                        │
+  │    barista-kafka-cluster -n kafka          │
+  │                                            │
+  │  change: replicas: 3                       │
+  │  to:     replicas: 4                       │
+  │                                            │
+  │  save → Strimzi automatically:             │
+  │  → creates new broker pod                  │
+  │  → rebalances partitions                   │
+  │  → no downtime!                            │
+  └────────────────────────────────────────────┘
+
+
+  HOW TO CREATE TOPICS
+  ══════════════════════════════════════════════════════════════
+
+  Old Way (manual):              Strimzi Way:
+  ──────────────────             ────────────
+  kafka-topics.sh --create →     create KafkaTopic yaml
+                                 kubectl apply -f topic.yaml
+                                 Entity Operator creates it!
+
+  KafkaTopic yaml:
+  ┌────────────────────────────────────────────┐
+  │  apiVersion: kafka.strimzi.io/v1beta2      │
+  │  kind: KafkaTopic                          │
+  │  metadata:                                 │
+  │    name: mat-data-topic                    │
+  │    namespace: kafka                        │
+  │    labels:                                 │
+  │      strimzi.io/cluster:                   │
+  │        barista-kafka-cluster               │
+  │  spec:                                     │
+  │    partitions: 3                           │
+  │    replicas: 3                             │
+  └────────────────────────────────────────────┘
+
+  kubectl apply -f topic.yaml
+  → Entity Operator (Topic Operator) sees this
+  → automatically creates topic in Kafka!
+
+  Check:
+  kubectl get kafkatopic -n kafka
+
+
+  HOW TO CREATE USERS
+  ══════════════════════════════════════════════════════════════
+
+  KafkaUser yaml:
+  ┌────────────────────────────────────────────┐
+  │  apiVersion: kafka.strimzi.io/v1beta2      │
+  │  kind: KafkaUser                           │
+  │  metadata:                                 │
+  │    name: atlas-user                        │
+  │    namespace: kafka                        │
+  │    labels:                                 │
+  │      strimzi.io/cluster:                   │
+  │        barista-kafka-cluster               │
+  │  spec:                                     │
+  │    authentication:                         │
+  │      type: scram-sha-512                   │
+  │    authorization:                          │
+  │      type: simple                          │
+  │      acls:                                 │
+  │        - resource:                         │
+  │            type: topic                     │
+  │            name: mat-data-topic            │
+  │          operations: [Read, Write]         │
+  └────────────────────────────────────────────┘
+
+  → Entity Operator (User Operator) sees this
+  → creates user + password secret automatically!
+
+
+  HOW TO UPGRADE KAFKA VERSION
+  ══════════════════════════════════════════════════════════════
+
+  Normal Server:                 Strimzi:
+  ──────────────                 ────────
+  SSH each server          →     edit Kafka CR
+  stop kafka               →     change version number
+  download new version     →     kubectl apply
+  update configs           →     Strimzi does rolling upgrade
+  start kafka              →     zero downtime!
+  repeat for each server
+
+  ┌────────────────────────────────────────────┐
+  │  kubectl edit kafka                        │
+  │    barista-kafka-cluster -n kafka          │
+  │                                            │
+  │  change:                                   │
+  │    spec.kafka.version: 3.6.0               │
+  │  to:                                       │
+  │    spec.kafka.version: 3.7.0               │
+  │                                            │
+  │  Strimzi handles the rest!                 │
+  └────────────────────────────────────────────┘
+
+
+  COMPLETE PICTURE — YOUR BARISTA SETUP
+  ══════════════════════════════════════════════════════════════
+
+  mat_ansible (Ansible)
+       │
+       │  roles/kubernetes/streaming/kafka
+       ▼
+  kubectl apply strimzi-operator.yaml
+       │
+       ▼
+  Strimzi Operator running (blp25082080)
+       │
+       │  kubectl apply kafka-cr.yaml
+       ▼
+  Strimzi reads CR → creates:
+       │
+       ├──▶ 3 Controller pods (pool-3,4,5)
+       │         → KRaft leader election
+       │         → cluster metadata
+       │
+       ├──▶ 3 Broker pods (pool-0,1,2)
+       │         → store data
+       │         → serve clients on 9092/9094
+       │
+       ├──▶ Entity Operator pod
+       │         → Topic Operator (manages KafkaTopic)
+       │         → User Operator  (manages KafkaUser)
+       │
+       └──▶ Services
+                 → bootstrap:9092    (internal)
+                 → nodeport:61032    (external bootstrap)
+                 → nodeport:61061/62/63 (per broker)
+                 → nodeport:61071    (kafka-ui)
+
+
+
+
+
+COMPLETE FLOW — FROM YOUR ACTUAL FILES
+═══════════════════════════════════════════════════════════════
+
+STEP 1 — WHERE VALUES COME FROM
+══════════════════════════════════════════════════════════════
+
+inventories/barista/pre_prod/group_vars/all/
+├── versions.yml          ← software versions
+├── config_kubernetes.yml ← all kafka settings
+└── all_secrets.yml       ← passwords (vault encrypted)
+
+versions.yml:
+  kubernetes.kafka.version: 4.3.0      ← kafka version
+  kubernetes.kafka.operator: 1.1.0     ← strimzi version
+
+config_kubernetes.yml (kafka section — REAL VALUES):
+  namespace:               kafka
+  cluster_name:            barista-kafka-cluster
+  broker_replicas:         3
+  controller_replicas:     3
+  storage_class:           longhorn
+  broker_storage_size:     20Gi
+  controller_storage_size: 4Gi
+  listeners:
+    internal_tls:          false   ← no TLS internally
+    external_tls:          false   ← no TLS externally
+  resources:
+    broker:
+      requests: cpu=250m  memory=1Gi
+      limits:   cpu=1000m memory=4Gi
+    controller:
+      requests: cpu=100m  memory=1Gi
+      limits:   cpu=1000m memory=2Gi
+  default_replication_factor: 3
+  min_insync_replicas:        2
+  default_num_partitions:     3
+  log_retention_hrs:          24
+  topology:
+    node_label_key:   node-role.kubernetes.io/kafka
+    node_label_value: "true"
+    topology_key:     topology.kubernetes.io/region
+    max_skew:         1
+    rack_enabled:     true
+
+
+STEP 2 — HOW ANSIBLE READS THESE VALUES
+══════════════════════════════════════════════════════════════
+
+roles/kubernetes/streaming/kafka/defaults/main.yml
+(maps config_kubernetes.yml values to simple variable names)
+
+config_kubernetes.yml                defaults/main.yml
+─────────────────────────────────    ──────────────────────────────────
+config_k8s.kafka.namespace      →    kafka_namespace
+config_k8s.kafka.cluster_name   →    kafka_cluster_name
+config_k8s.kafka.broker_replicas→    kafka_broker_replicas
+config_k8s.kafka.storage_class  →    kafka_storage_class
+ports.kubernetes.kafka.internal →    kafka_internal_port
+version.kubernetes.kafka.version→    kafka_version
+
+
+STEP 3 — TEMPLATES GET RENDERED WITH REAL VALUES
+══════════════════════════════════════════════════════════════
+
+3 TEMPLATES → 3 KUBERNETES RESOURCES:
+
+┌─────────────────────────────────────────────────────────────┐
+│  kafka-controller.yml.j2  →  KafkaNodePool (controllers)   │
+│                                                             │
+│  TEMPLATE                    REAL VALUE                     │
+│  ────────────────────────    ─────────────────────────────  │
+│  {{ kafka_controller_       controller-pool                 │
+│     pool_name }}                                            │
+│  {{ kafka_namespace }}       kafka                          │
+│  {{ kafka_cluster_name }}    barista-kafka-cluster          │
+│  {{ kafka_controller_        3                              │
+│     replicas }}                                             │
+│  roles: - controller    ←── FIXED (not a variable)         │
+│  {{ kafka_controller_        cpu=100m  mem=1Gi              │
+│     requests_cpu/memory}}                                   │
+│  {{ kafka_controller_        cpu=1000m mem=2Gi              │
+│     limits_cpu/memory }}                                    │
+│  {{ kafka_node_label_key }}  node-role.kubernetes.io/kafka  │
+│  {{ kafka_node_label_        "true"                         │
+│     value }}                                                │
+│  {{ kafka_topology_key }}    topology.kubernetes.io/region  │
+│  {{ kafka_controller_        4Gi                            │
+│     storage_size }}                                         │
+│  {{ kafka_storage_class }}   longhorn                       │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  kafka-broker.yml.j2  →  KafkaNodePool (brokers)           │
+│                                                             │
+│  SAME STRUCTURE AS CONTROLLER BUT:                          │
+│  roles: - broker        ←── broker not controller          │
+│  {{ kafka_broker_            cpu=250m  mem=1Gi              │
+│     requests_cpu/memory}}                                   │
+│  {{ kafka_broker_            cpu=1000m mem=4Gi              │
+│     limits_cpu/memory }}                                    │
+│  {{ kafka_broker_            20Gi  (vs 4Gi controller)      │
+│     storage_size }}                                         │
+│                                                             │
+│  NOTE: broker has MORE storage (20Gi) because it           │
+│  stores actual message data!                                │
+│  controller only stores metadata (4Gi)                      │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  kafka-values.yml.j2  →  Kafka CR (main cluster config)    │
+│                                                             │
+│  TEMPLATE                    REAL VALUE                     │
+│  ────────────────────────    ─────────────────────────────  │
+│  kind: Kafka            ←── main cluster resource           │
+│  annotations:                                               │
+│    strimzi.io/node-pools: enabled  ← uses node pools       │
+│    strimzi.io/kraft: enabled       ← KRaft mode (no ZK)    │
+│                                                             │
+│  {{ kafka_version }}         4.3.0                          │
+│                                                             │
+│  listeners:                                                 │
+│    internal port: 9092  tls: false                          │
+│    external port: 9094  type: nodeport                      │
+│                                                             │
+│  brokers loop (Jinja2):                                     │
+│  {% for i in range(0,3) %}                                  │
+│    broker: 0  nodePort: 61061  (61061 + 0)                  │
+│    broker: 1  nodePort: 61062  (61061 + 1)                  │
+│    broker: 2  nodePort: 61063  (61061 + 2)                  │
+│  {% endfor %}                                               │
+│  ↑ THIS is how nodeports 61061/62/63 were generated!        │
+│                                                             │
+│  config:                                                    │
+│    replication.factor:    3                                 │
+│    min.insync.replicas:   2                                 │
+│    num.partitions:        3                                 │
+│    log.retention.hours:   24                                │
+│                                                             │
+│  entityOperator:                                            │
+│    topicOperator: {}   ← enables topic management           │
+│    userOperator:  {}   ← enables user management            │
+└─────────────────────────────────────────────────────────────┘
+
+
+STEP 4 — ANSIBLE TASKS APPLY THESE TEMPLATES
+══════════════════════════════════════════════════════════════
+
+roles/kubernetes/streaming/kafka/tasks/
+├── main.yml      → calls operator.yml then deploy.yml
+├── operator.yml  → installs Strimzi operator via Helm
+├── deploy.yml    → applies the 3 templates above
+└── validate.yml  → waits for cluster to be Ready
+
+
+STEP 5 — STRIMZI CREATES EVERYTHING
+══════════════════════════════════════════════════════════════
+
+kubectl apply kafka-controller.yml  ─┐
+kubectl apply kafka-broker.yml      ─┼─▶ Strimzi reads all 3
+kubectl apply kafka-values.yml      ─┘   creates pods/services
+
+Result (what you see today):
+  controller-pool-3 on blp25082087  ✅
+  controller-pool-4 on blp25082081  ✅ (leader)
+  controller-pool-5 on blp25082084  ✅
+  broker-pool-0     on blp25082081  ✅
+  broker-pool-1     on blp25082087  ✅
+  broker-pool-2     on blp25082084  ✅
+  entity-operator   on blp25082087  ✅
+
+
+HOW TO UPDATE ANY SETTING
+══════════════════════════════════════════════════════════════
+
+Example: increase broker storage from 20Gi to 50Gi
+
+1. edit inventory file:
+   inventories/barista/pre_prod/group_vars/all/config_kubernetes.yml
+   change: broker_storage_size: 20Gi
+   to:     broker_storage_size: 50Gi
+
+2. run ansible:
+   ansible-playbook playbook/kubernetes/kafka.yaml \
+     -i inventories/barista/pre_prod/hosts \
+     --vault-password-file .vault
+
+3. Ansible renders template with new value
+4. kubectl apply sends updated CR to Kubernetes
+5. Strimzi handles rolling update automatically
+
+
+CHEAT SHEET — CHECK REAL VALUES
+══════════════════════════════════════════════════════════════
+
+# see rendered kafka CR (actual deployed config)
+kubectl get kafka barista-kafka-cluster -n kafka -o yaml
+
+# see broker node pool
+kubectl get kafkanodepool broker-pool -n kafka -o yaml   ----------to get our kafka created yaml---(useful)
+
+# see controller node pool
+kubectl get kafkanodepool controller-pool -n kafka -o yaml
+
+# check storage (PVCs)
+kubectl get pvc -n kafka
+
+# check resources on a pod
+kubectl describe pod barista-kafka-cluster-broker-pool-0 \
+  -n kafka | grep -A5 "Requests\|Limits"
+
+# check node labels (affinity)
+kubectl get nodes --show-labels | grep kafka
+
+  # view kafka CR (main config)
+  kubectl get kafka -n kafka
+  kubectl describe kafka barista-kafka-cluster -n kafka
+
+  # edit kafka config
+  kubectl edit kafka barista-kafka-cluster -n kafka
+
+  # view all kafka resources
+  kubectl get kafka,kafkatopic,kafkauser -n kafka
+
+  # view all pods
+  kubectl get pods -n kafka -o wide
+
+  # login to broker
+  kubectl exec -it barista-kafka-cluster-broker-pool-0 -n kafka -- bash
+
+  # check logs
+  kubectl logs barista-kafka-cluster-broker-pool-0 -n kafka
+
+  # check strimzi operator logs
+  kubectl logs strimzi-cluster-operator-687687c99b-kc28x -n kafka
+
+  # check entity operator logs
+  kubectl logs barista-kafka-cluster-entity-operator-847b498c69-zhbgt \
+    -n kafka -c topic-operator
+  kubectl logs barista-kafka-cluster-entity-operator-847b498c69-zhbgt \
+    -n kafka -c user-operator
+
+
+
+
+
+
+
+
+
+
+
+
+
+roles/kubernetes/streaming/kafka/templates/kafka-controller.yml.j2
+
+WHAT IS THIS FILE?
+═══════════════════════════════════════════════════════════════
+
+This is a Jinja2 template (Ansible)
+→ {{ variables }} get replaced with real values
+→ then kubectl apply sends it to Kubernetes
+→ Strimzi reads it and creates controller pods
+
+FILE LOCATION (in your project):
+mat_ansible/roles/kubernetes/streaming/kafka/templates/
+                                              └── kafka_node_pool_controller.yaml.j2
+
+
+
+BREAKING DOWN EACH SECTION
+═══════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────┐
+│  HEADER                                                     │
+│  ───────                                                    │
+│  apiVersion: kafka.strimzi.io/v1   ← Strimzi API           │
+│  kind: KafkaNodePool               ← type of resource       │
+│  name: {{ kafka_controller_pool_name }}                     │
+│         → becomes: controller-pool                          │
+│  namespace: {{ kafka_namespace }}                           │
+│         → becomes: kafka                                    │
+│  labels:                                                    │
+│    strimzi.io/cluster: {{ kafka_cluster_name }}             │
+│         → becomes: barista-kafka-cluster                    │
+│         → links this pool TO the kafka cluster              │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  SPEC — REPLICAS & ROLE                                     │
+│  ──────────────────────                                     │
+│  replicas: {{ kafka_controller_replicas }}                  │
+│         → becomes: 3  (you have pool-3, pool-4, pool-5)     │
+│                                                             │
+│  roles:                                                     │
+│    - controller    ← THIS is why these pods are             │
+│                      controllers NOT brokers!               │
+│                      (broker pool has - broker here)        │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  RESOURCES — CPU & MEMORY LIMITS                            │
+│  ───────────────────────────────                            │
+│  requests:                                                  │
+│    cpu: {{ kafka_controller_requests_cpu }}                 │
+│         → minimum CPU guaranteed to pod                     │
+│    memory: {{ kafka_controller_requests_memory }}           │
+│         → minimum RAM guaranteed to pod                     │
+│  limits:                                                    │
+│    cpu: {{ kafka_controller_limits_cpu }}                   │
+│         → maximum CPU pod can use                           │
+│    memory: {{ kafka_controller_limits_memory }}             │
+│         → maximum RAM pod can use                           │
+│                                                             │
+│  requests ≤ actual usage ≤ limits                           │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  TEMPLATE — POD SETTINGS                                    │
+│  ───────────────────────                                    │
+│                                                             │
+│  annotations:                                               │
+│    prometheus.io/scrape: "true"   ← tell prometheus         │
+│    prometheus.io/port: "9404"       to scrape this pod      │
+│    prometheus.io/path: "/metrics"   on port 9404            │
+│    (this is how Grafana gets kafka metrics!)                 │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  AFFINITY — WHERE PODS CAN RUN                              │
+│  ─────────────────────────────                              │
+│                                                             │
+│  nodeAffinity:                                              │
+│    requiredDuringScheduling...                              │
+│      matchExpressions:                                      │
+│        key: {{ kafka_node_label_key }}                      │
+│        operator: In                                         │
+│        values: {{ kafka_node_label_value }}                 │
+│                                                             │
+│  Translation:                                               │
+│  "Only schedule controller pods on nodes                    │
+│   that have label kafka_node_label_key=value"               │
+│                                                             │
+│  Example:                                                   │
+│  node label: role=kafka                                     │
+│  → only blp25082081, blp25082084, blp25082087               │
+│    get controller pods (not master node)                    │
+│                                                             │
+│  podAntiAffinity:                                           │
+│    requiredDuringScheduling...                              │
+│      topologyKey: {{ kafka_topology_key }}                  │
+│                                                             │
+│  Translation:                                               │
+│  "Never put 2 controller pods on SAME node"                 │
+│  → pool-3 on blp25082087                                    │
+│  → pool-4 on blp25082081   ← each on different node ✅      │
+│  → pool-5 on blp25082084                                    │
+│  (high availability!)                                       │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  TOPOLOGY SPREAD CONSTRAINTS                                │
+│  ───────────────────────────                                │
+│  maxSkew: {{ kafka_topology_max_skew }}                     │
+│         → usually 1                                         │
+│  whenUnsatisfiable: DoNotSchedule                           │
+│                                                             │
+│  Translation:                                               │
+│  "Spread pods evenly across nodes"                          │
+│  "If can't spread evenly → don't schedule at all"           │
+│                                                             │
+│  Example (3 controllers, 3 nodes):                          │
+│  node1: 1 controller ✅                                     │
+│  node2: 1 controller ✅                                     │
+│  node3: 1 controller ✅  → perfectly balanced               │
+│                                                             │
+│  If node3 is down:                                          │
+│  node1: 1 controller                                        │
+│  node2: 1 controller                                        │
+│  node3: 0             → skew=1, ok                          │
+│  node1: 2 controllers → skew=2, DoNotSchedule! ❌           │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  STORAGE                                                    │
+│  ───────                                                    │
+│  type: persistent-claim                                     │
+│         → uses PVC (PersistentVolumeClaim)                  │
+│         → data survives pod restarts ✅                     │
+│  size: {{ kafka_controller_storage_size }}                  │
+│         → e.g. 100Gi                                        │
+│  class: {{ kafka_storage_class }}                           │
+│         → e.g. longhorn (your storage class)                │
+└─────────────────────────────────────────────────────────────┘
+
+
+WHERE ARE THE VARIABLE VALUES?
+═══════════════════════════════════════════════════════════════
+
+Variables defined in Ansible:
+mat_ansible/roles/kubernetes/streaming/kafka/
+    └── defaults/main.yml   ← default values
+    └── vars/main.yml       ← override values
+
+OR in inventory:
+mat_ansible/inventories/barista/
+    └── pre_prod/
+        └── group_vars/
+            └── all.yml     ← environment specific values
+
+
+
+HOW TO CHECK WHAT'S DEPLOYED
+═══════════════════════════════════════════════════════════════
+
+# see all node pools
+kubectl get kafkanodepool -n kafka
+
+# see controller pool details
+kubectl describe kafkanodepool \
+  barista-kafka-cluster-controller-pool -n kafka
+
+# see actual values (replicas, resources etc)
+kubectl get kafkanodepool \
+  barista-kafka-cluster-controller-pool \
+  -n kafka -o yaml
+
+# check which nodes controllers are on
+kubectl get pods -n kafka -o wide | grep controller
+
+# check resources allocated
+kubectl describe pod \
+  barista-kafka-cluster-controller-pool-3 \
+  -n kafka | grep -A5 "Requests\|Limits"
+
+# check storage (PVC)
+kubectl get pvc -n kafka | grep controller
+
+# check node labels
+kubectl get nodes --show-labels | grep kafka
+
+
+
+HOW TO UPDATE CONFIG
+═══════════════════════════════════════════════════════════════
+
+Option 1 — via Ansible (recommended):
+──────────────────────────────────────
+1. update variable in inventory/vars file
+   e.g. kafka_controller_requests_memory: 4Gi → 8Gi
+
+2. run ansible playbook
+   ansible-playbook playbook/kubernetes/kafka.yaml \
+     -i inventories/barista/pre_prod/hosts \
+     --vault-password-file .vault
+
+3. Ansible renders template with new values
+4. kubectl apply sends to Kubernetes
+5. Strimzi does rolling restart automatically
+
+
+Option 2 — direct kubectl edit (quick fix):
+────────────────────────────────────────────
+kubectl edit kafkanodepool \
+  barista-kafka-cluster-controller-pool -n kafka
+
+→ change value directly
+→ save → Strimzi applies change automatically
+→ BUT this will be overwritten next Ansible run!
+   so always update Ansible vars too
+
+
+
+FULL FLOW SUMMARY
+═══════════════════════════════════════════════════════════════
+
+Ansible vars (defaults/main.yml)
+       │
+       │  {{ kafka_controller_replicas }} = 3
+       │  {{ kafka_controller_requests_memory }} = 2Gi
+       │  {{ kafka_node_label_key }} = role
+       │  {{ kafka_node_label_value }} = kafka
+       │  {{ kafka_storage_class }} = longhorn
+       ▼
+Jinja2 template rendered
+(variables replaced with real values)
+       │
+       ▼
+kubectl apply → KafkaNodePool CR sent to Kubernetes
+       │
+       ▼
+Strimzi Operator reads KafkaNodePool
+       │
+       ├── schedules pods on labeled nodes only
+       ├── ensures 1 pod per node (antiAffinity)
+       ├── allocates CPU/memory as defined
+       ├── creates PVC via longhorn (storage)
+       └── starts controller pods (pool-3, pool-4, pool-5)
+

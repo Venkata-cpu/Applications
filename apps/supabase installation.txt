@@ -1,0 +1,188 @@
+supabase
+
+
+supabase role first:
+
+1 directory listed supabase
+3 files read
+README.md
+main.yaml
+pre_deploy.yml
+
+Now let me check the test inventory:
+3 files read
+config_kubernetes.yml
+versions.yml
+hosts
+
+Now I have everything. Here's the complete guide based on your actual test environment:
+
+SUPABASE INSTALLATION ON TEST — COMPLETE GUIDE
+═══════════════════════════════════════════════════════════════
+
+YOUR TEST ENVIRONMENT (from hosts file)
+──────────────────────────────────────────
+Master:   blt25082005  (10.13.149.184)  ← ansible runs here
+Workers:  blt25082009  (10.13.149.185)
+          blt25082010  (10.13.149.186)
+          blt25082011  (10.13.149.187)
+          blt25082004  (10.13.149.183)  ← librefs node
+
+
+TEST CONFIG (already set in config_kubernetes.yml)
+──────────────────────────────────────────────────
+namespace:          supabase
+chart version:      0.5.6
+db mode:            built-in (enabled: true)
+storage:            longhorn  20Gi
+replicas:           1 each (test = single replica)
+ingress host:       barista.test.nat.bt.com
+ingress path:       /supabase
+s3 storage:         NOT enabled (uses longhorn PVC)
+
+Copy
+PRE-CHECKS (do these BEFORE running)
+1. Kubernetes cluster is healthy
+kubectl get nodes
+# ALL nodes must be Ready
+
+
+2. Longhorn is running (storage provider)
+kubectl get pods -n longhorn-system | grep -v Running
+# should return nothing — all pods Running
+kubectl get sc
+# longhorn must be listed
+
+
+3. Ingress controller is running
+kubectl get pods -A | grep ingress
+# must be Running
+kubectl get ingressclass
+# must show an ingress class
+
+
+4. Enough resources available
+kubectl describe nodes | grep -A5 "Allocated resources"
+# need at least 4 CPU + 8Gi RAM free across workers
+
+
+5. Check vault secrets exist
+# on ansible server (blt25082005)
+ansible-vault view \
+  inventories/barista/test/group_vars/all/all_secrets.yml \
+  --vault-password-file .vault | grep supabase
+
+
+You need these 5 secrets set:
+supabase_jwt_secret_vault        ← 64+ chars
+supabase_anon_key_vault          ← JWT token
+supabase_service_role_key_vault  ← JWT token
+supabase_dashboard_password_vault← studio login password
+supabase_db_password_vault       ← postgres password
+
+
+If missing, generate them:
+# generate jwt secret
+openssl rand -base64 48
+
+# then edit vault
+ansible-vault edit \
+  inventories/barista/test/group_vars/all/all_secrets.yml \
+  --vault-password-file .vault
+
+
+6. Helm is installed on master
+helm version --short
+# must show v3.x
+
+
+INSTALL — RUN THE PLAYBOOK
+# dry run first (check mode — no changes)
+ansible-playbook -i inventories/barista/test/hosts \
+  playbook/kubernetes/kubernetes_supabase.yaml \
+  --vault-password-file .vault \
+  --check --diff
+
+# actual install
+ansible-playbook -i inventories/barista/test/hosts \
+  playbook/kubernetes/kubernetes_supabase.yaml \
+  --vault-password-file .vault
+
+
+What Ansible does internally:
+validate.yml     → checks all 10 pre-flight conditions
+     ↓
+pre_deploy.yml   → creates S3 bucket (skipped — s3 disabled in test)
+     ↓
+deploy.yml       → helm repo add → namespace create
+                 → helm install supabase → wait for pods
+     ↓
+post_install.yml → installs pgjwt extension in postgres
+                 → verifies all pods running
+                 → prints status report
+
+
+POST-CHECKS (do these AFTER install)
+1. All pods running
+kubectl get pods -n supabase -o wide
+
+
+Expected for test (1 replica each):
+
+supabase-supabase-db-0          1/1  Running
+supabase-supabase-kong-xxx      1/1  Running
+supabase-supabase-auth-xxx      1/1  Running
+supabase-supabase-rest-xxx      1/1  Running
+supabase-supabase-realtime-xxx  1/1  Running
+supabase-supabase-studio-xxx    1/1  Running
+supabase-supabase-storage-xxx   1/1  Running
+supabase-supabase-meta-xxx      1/1  Running
+
+
+2. PVC is bound (storage)
+kubectl get pvc -n supabase
+# STATUS must be Bound (not Pending)
+
+
+3. Services are up
+kubectl get svc -n supabase
+
+
+4. Ingress is created
+kubectl get ingress -n supabase
+# should show barista.test.nat.bt.com
+
+
+5. Test API is responding
+# from master node
+curl -s -o /dev/null -w "%{http_code}" \
+  http://barista.test.nat.bt.com/supabase
+# expect 200 or 302
+
+
+6. Check logs if any pod is not Running
+# check specific pod logs
+kubectl logs -n supabase <pod-name>
+
+# check previous crash logs
+kubectl logs -n supabase <pod-name> --previous
+
+# check events
+kubectl get events -n supabase \
+  --sort-by='.lastTimestamp' | tail -20
+
+
+ACCESS SUPABASE STUDIO (UI)
+URL:      http://barista.test.nat.bt.com/supabase
+User:     admin
+Password: <supabase_dashboard_password_vault value>
+
+QUICK SUMMARY
+BEFORE INSTALL          DURING INSTALL        AFTER INSTALL
+──────────────          ──────────────        ─────────────
+kubectl get nodes  →    ansible-playbook  →   kubectl get pods -n supabase
+kubectl get sc          (runs validate,        kubectl get pvc -n supabase
+helm version            pre_deploy,            kubectl get ingress -n supabase
+check vault secrets     deploy,                curl http://barista.test.nat.bt.com
+check resources         post_install)          open Studio UI in browser
+

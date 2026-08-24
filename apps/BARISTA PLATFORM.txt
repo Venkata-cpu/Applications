@@ -1,0 +1,259 @@
+BARISTA PLATFORM
+
+
+BARISTA PLATFORM — WHAT EACH SERVICE DOES & HOW THEY CONNECT
+═══════════════════════════════════════════════════════════════
+
+THINK OF IT LIKE A COMPANY BUILDING:
+─────────────────────────────────────
+  Kafka     = Post Room    (receives & routes messages)
+  MongoDB   = Filing Room  (stores documents/records)
+  Supabase  = Reception    (frontend API + database)
+  LibreFS   = Storage Room (stores files/objects)
+  Longhorn  = Hard Drives  (disk storage for all pods)
+  Strimzi   = Post Manager (manages the post room)
+
+
+FULL PLATFORM FLOW
+═══════════════════════════════════════════════════════════════
+
+                    BARISTA PLATFORM
+┌────────────────────────────────────────────────────────────┐
+│                                                            │
+│  EXTERNAL / APPLICATIONS                                   │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐             │
+│  │  ATLAS   │    │HERCULES  │    │  OTHER   │             │
+│  │(producer)│    │(consumer)│    │   APPS   │             │
+│  └────┬─────┘    └────┬─────┘    └────┬─────┘             │
+│       │               │               │                    │
+│       ▼               │               │                    │
+│  ┌─────────────────────────────────┐  │                    │
+│  │           KAFKA                 │  │                    │
+│  │  (blp25082081/84/87)            │  │                    │
+│  │                                 │  │                    │
+│  │  receives events/messages       │  │                    │
+│  │  stores temporarily (24hrs)     │  │                    │
+│  │  routes to consumers            │  │                    │
+│  └──────────────┬──────────────────┘  │                    │
+│                 │                     │                    │
+│        consumed by                    │                    │
+│                 │                     │                    │
+│                 ▼                     ▼                    │
+│  ┌──────────────────┐   ┌─────────────────────────────┐   │
+│  │    MONGODB        │   │         SUPABASE            │   │
+│  │ (blp25082082/     │   │  (spread across all nodes)  │   │
+│  │  85/88)           │   │                             │   │
+│  │                   │   │  ┌─────────┐ ┌──────────┐  │   │
+│  │ stores:           │   │  │PostgreSQL│ │  Auth    │  │   │
+│  │ → raw events      │   │  │  (CNPG)  │ │ Service  │  │   │
+│  │ → processed data  │   │  └─────────┘ └──────────┘  │   │
+│  │ → app state       │   │  ┌─────────┐ ┌──────────┐  │   │
+│  │ → documents       │   │  │REST API │ │  Studio  │  │   │
+│  │                   │   │  │(PostgREST│ │   (UI)   │  │   │
+│  │ replica set HA:   │   │  └─────────┘ └──────────┘  │   │
+│  │ 1 per region      │   │  ┌─────────┐ ┌──────────┐  │   │
+│  └───────────────────┘   │  │Realtime │ │  Kong    │  │   │
+│                           │  │(websocket│ │(API GW)  │  │   │
+│                           │  └─────────┘ └──────────┘  │   │
+│                           └──────────────┬──────────────┘   │
+│                                          │                  │
+│                           stores files   │                  │
+│                                          ▼                  │
+│                           ┌─────────────────────────────┐  │
+│                           │         LIBREFS              │  │
+│                           │  (blp25082080/89/90/91)      │  │
+│                           │                              │  │
+│                           │  S3-compatible object store  │  │
+│                           │  → Supabase file uploads     │  │
+│                           │  → Longhorn backups          │  │
+│                           │  → any binary/file storage   │  │
+│                           │                              │  │
+│                           │  4 nodes = distributed mode  │  │
+│                           │  like AWS S3 but on-prem     │  │
+│                           └──────────────────────────────┘  │
+│                                                             │
+│  STORAGE LAYER (underneath everything)                      │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                    LONGHORN                          │  │
+│  │         (runs on ALL worker nodes)                   │  │
+│  │                                                      │  │
+│  │  → provides persistent disk to ALL pods              │  │
+│  │  → Kafka uses it    (20Gi per broker)                │  │
+│  │  → MongoDB uses it  (50Gi per replica)               │  │
+│  │  → Supabase uses it (20Gi for postgres)              │  │
+│  │  → LibreFS uses it  (hostPath on nodes)              │  │
+│  │                                                      │  │
+│  │  replicates data across nodes (2 replicas)           │  │
+│  │  if 1 node dies → data still safe on another node    │  │
+│  └──────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────┘
+
+
+SIMPLE ONE-LINE EXPLANATION OF EACH
+═══════════════════════════════════════════════════════════════
+
+SERVICE     WHAT IT IS              REAL WORLD EXAMPLE
+──────────  ──────────────────────  ──────────────────────────
+Kafka       Message queue           WhatsApp message delivery
+MongoDB     Document database       storing JSON records
+Supabase    Backend-as-a-Service    like Firebase (Google)
+            (Postgres + API + Auth)
+LibreFS     Object/file storage     like AWS S3 (on-prem)
+Longhorn    Block storage           like AWS EBS (on-prem)
+Strimzi     Kafka operator          manager for Kafka on K8s
+
+
+SUPABASE — WHAT IS IT EXACTLY?
+═══════════════════════════════════════════════════════════════
+
+Supabase is NOT one thing — it's 6 services in one:
+
+┌─────────────────────────────────────────────────────────────┐
+│  SUPABASE COMPONENTS                                        │
+│                                                             │
+│  PostgreSQL (CNPG)  → main database (stores app data)       │
+│  PostgREST          → auto REST API from postgres tables    │
+│  Auth Service       → login/logout/JWT tokens               │
+│  Realtime           → websocket live updates                │
+│  Storage            → file uploads (uses LibreFS/S3)        │
+│  Studio             → web UI to manage everything           │
+│  Kong               → API gateway (routes all requests)     │
+│                                                             │
+│  Think of it as:                                            │
+│  "Give me a database and I'll auto-generate                 │
+│   an API, auth, file storage and UI for it"                 │
+└─────────────────────────────────────────────────────────────┘
+
+
+HOW LIBREFS AND LONGHORN DIFFER
+═══════════════════════════════════════════════════════════════
+
+LONGHORN                          LIBREFS
+────────────────────────          ────────────────────────
+Block storage                     Object storage
+like a hard drive                 like a file cabinet
+mounted inside pod                accessed via HTTP/S3 API
+used by databases                 used for files/backups
+(Kafka, MongoDB, Postgres)        (images, logs, backups)
+kubectl get pvc                   curl http://librefs:9000
+
+
+COMPLETE DATA FLOW EXAMPLE
+═══════════════════════════════════════════════════════════════
+
+1. App sends event to Kafka (port 9092)
+        │
+        ▼
+2. Kafka stores message in broker pod
+   (data saved on Longhorn PVC - 20Gi)
+        │
+        ▼
+3. HERCULES consumes from Kafka
+        │
+        ├──▶ saves to MongoDB (documents)
+        │    (data on Longhorn PVC - 50Gi)
+        │
+        └──▶ Supabase REST API reads MongoDB/Postgres
+                  │
+                  ├──▶ file uploads → LibreFS (S3)
+                  │
+                  └──▶ UI via Supabase Studio
+
+
+
+
+Bottom line — each service has one job:
+
+Kafka → move data between apps
+MongoDB → store document data
+Supabase → provide API + auth + database for frontend apps
+LibreFS → store files (like S3)
+Longhorn → provide disk to all pods (invisible layer)
+
+
+
+
+WHICH OPERATOR MANAGES WHICH APP
+═══════════════════════════════════════════════════════════════
+
+APP           OPERATOR/MANAGER        HOW DEPLOYED
+────────────  ──────────────────────  ──────────────────────
+Kafka         Strimzi Operator        Helm + Kafka CR yaml
+MongoDB       Percona Operator        Helm + PerconaServerMongoDB CR
+Supabase      Helm Chart              Helm values yaml
+LibreFS       Helm Chart              Helm values yaml
+Longhorn      Longhorn Operator       Helm + Longhorn CR
+PostgreSQL    CloudNativePG (CNPG)    Helm + Cluster CR
+              Operator
+
+
+EACH APP HAS ITS OWN OPERATOR OR HELM CHART
+═══════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────┐
+│  STRIMZI OPERATOR                                           │
+│  → ONLY manages Kafka                                       │
+│  → watches kind: Kafka                                      │
+│  → watches kind: KafkaNodePool                              │
+│  → watches kind: KafkaTopic                                 │
+│  → watches kind: KafkaUser                                  │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  PERCONA OPERATOR                                           │
+│  → ONLY manages MongoDB                                     │
+│  → watches kind: PerconaServerMongoDB                       │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  CLOUDNATIVEPG (CNPG) OPERATOR                              │
+│  → ONLY manages PostgreSQL                                  │
+│  → used by Supabase internally                              │
+│  → watches kind: Cluster                                    │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  LONGHORN OPERATOR                                          │
+│  → ONLY manages block storage                               │
+│  → watches kind: Volume                                     │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  HELM CHART (no operator)                                   │
+│  → Supabase  → just a helm chart                            │
+│  → LibreFS   → just a helm chart                            │
+│  → Kafka UI  → just a helm chart                            │
+└─────────────────────────────────────────────────────────────┘
+
+
+SIMPLE RULE
+═══════════════════════════════════════════════════════════════
+
+Complex stateful apps  →  need an Operator
+(Kafka, MongoDB,           (operator handles
+ PostgreSQL)                upgrades, HA, backups)
+
+Simple stateless apps  →  just Helm chart
+(Supabase UI, Kafka UI,    (no special lifecycle
+ LibreFS)                   management needed)
+
+
+IN YOUR PROJECT (mat_ansible roles)
+═══════════════════════════════════════════════════════════════
+
+roles/kubernetes/
+├── streaming/
+│   └── kafka/          → deploys Strimzi operator + Kafka CR
+│
+├── database/
+│   ├── mongodb/        → deploys Percona operator + MongoDB CR
+│   ├── postgres/       → deploys CNPG operator + Cluster CR
+│   └── supabase/       → deploys Supabase via Helm
+│
+├── storage/
+│   ├── longhorn/       → deploys Longhorn operator
+│   └── librefs/        → deploys LibreFS via Helm
+│
+└── frontend/
+    └── kafka_ui/       → deploys Kafka UI via Helm
+

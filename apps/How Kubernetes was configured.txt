@@ -1,0 +1,208 @@
+How Kubernetes was configured
+
+cat /var/lib/kubelet/instance-config.yaml
+grep -i "data-dir" /etc/kubernetes/manifests/etcd.yaml
+grep -i "root" /etc/containerd/config.toml 2>/dev/null
+cat /var/lib/kubelet/kubeadm-flags.env
+ls -la /apps/kubelet
+findmnt | grep kubelet
+mount | grep apps
+ps aux | grep "[k]ubelet"
+
+
+# 1. Where kubelet stores pod data (look for --root-dir flag)
+cat /var/lib/kubelet/instance-config.yaml
+
+# 2. Where etcd stores data (check the static pod manifest)
+grep -i "data-dir" /etc/kubernetes/manifests/etcd.yaml
+
+# 3. Where containerd stores data
+grep -i "root" /etc/containerd/config.toml 2>/dev/null
+
+# 4. Full kubelet flags (check for any custom paths)
+cat /var/lib/kubelet/kubeadm-flags.env
+
+
+# Check if there's a symlink or bind mount
+ls -la /apps/kubelet
+findmnt | grep kubelet
+mount | grep apps
+
+# Check the actual running kubelet process for ALL flags
+ps aux | grep "[k]ubelet"
+
+
+Try all this cmds and gve to copilot will share clear out put how itwas configured.
+
+
+Kubelet is running with --root-dir=/apps/kubelet — so all pod data goes to /apps. And from the mount output, containerd snapshots are also on /apps/containerd/. So Kubernetes is properly configured to use /apps.
+
+Final clear picture:
+
+Component	Config at	Data stored at	On /var?
+kubelet	
+config.yaml
+/apps/kubelet/ (via --root-dir)	Config only (tiny)
+containerd images/snapshots	
+config.toml
+ says /var/lib/containerd	Actually using /apps/containerd/	Metadata only
+etcd	
+etcd.yaml
+/var/lib/etcd/	Yes (492MB)
+K8s certs/configs	/etc/kubernetes/	Same	Yes (tiny, static)
+
+So the answer is:
+All heavy/growing Kubernetes data (pod storage, container images, snapshots) is configured to go to /apps which is on a separate disk (/dev/mapper/AutoVG2-AutoLV1). Only etcd (492MB) and small config files sit on /var — those won't cause issues.
+
+
+simly:-
+To check on other servers, just run:
+ps aux | grep "[k]ubelet" | grep -oP "\-\-root-dir=\S+"
+If it shows --root-dir=/apps/kubelet — it's properly configured. If it shows nothing or /var/lib/kubelet — that server's pod data is on /var and could be a risk.
+
+# 1. Kubelet - where pod data goes
+ps aux | grep "[k]ubelet" | grep -oP "\-\-root-dir=\S+"
+
+# 2. etcd - where cluster data goes
+grep -i "data-dir" /etc/kubernetes/manifests/etcd.yaml
+
+# 3. containerd - where container images go
+grep "root" /etc/containerd/config.toml
+
+# 4. Confirm /apps is a separate disk
+df -h /apps
+
+[root@blt25082008 pc567288]# ps aux | grep "[k]ubelet" | grep -oP "\-\-root-dir=\S+"
+--root-dir=/apps/kubelet
+[root@blt25082008 pc567288]# grep -i "data-dir" /etc/kubernetes/manifests/etcd.yaml
+    - --data-dir=/var/lib/etcd
+[root@blt25082008 pc567288]# grep "root" /etc/containerd/config.toml
+root = '/var/lib/containerd'
+    root_path = ''
+    root_path = ''
+    root_path = ''
+    root_path = ''
+    root_path = ''
+    root_path = ''
+    root_path = ''
+[root@blt25082008 pc567288]# df -h /apps
+Filesystem                   Size  Used Avail Use% Mounted on
+/dev/mapper/AutoVG2-AutoLV1  100G  8.1G   92G   9% /apps
+[root@blt25082008 pc567288]#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+out Kubernetes set is like:-
+Kubernetes Node Configuration — Standard Build
+All our Kubernetes control-plane nodes follow the same configuration. Verified across 8 nodes (bld, blp, blt prefixes).
+
+How it's set up
+Cluster bootstrap: kubeadm
+Container runtime: containerd (socket: containerd.sock)
+Storage: A dedicated LVM volume is used to keep Kubernetes data separate from the OS disk.
+
+/dev/mapper/AutoVG2-AutoLV1  →  mounted at /apps  (XFS filesystem)
+This volume holds:
+
+/apps/kubelet/ — Kubelet working directory (pod data, state files, volumes)
+/apps/containerd/ — Container images and overlay layers
+Why? Keeps container workloads from filling up the root (/) filesystem. If pods use too much disk, only /apps fills up — the OS stays healthy.
+
+Key settings (non-default)
+Setting	Our value	Default
+Kubelet root directory	/apps/kubelet	/var/lib/kubelet
+Containerd storage	/apps/containerd	/var/lib/containerd
+API server port	61000 / 61003 / 61006	6443
+NodePort range	61000–61149 (150 ports)	30000–32767
+What stays at default locations
+/var/lib/etcd — etcd database
+/etc/kubernetes/ — kubeconfigs, PKI certs, static pod manifests
+
+config.yaml
+ — kubelet config file
+Kubelet process (what's actually running)
+
+/usr/bin/kubelet \
+  --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf \
+  --kubeconfig=/etc/kubernetes/kubelet.conf \
+  --config=/var/lib/kubelet/config.yaml \
+  --root-dir=/apps/kubelet
+Node inventory
+Node	IP	API Port	Environment
+bld25082013	10.11.54.45	61006	bld
+bld25082001	10.11.54.45	61006	bld
+blp25082078	10.55.4.226	61003	blp
+blp25082065	10.11.74.102	61000	blp
+blp25082026	10.55.4.220	61003	blp
+blp25082004	10.11.74.82	61000	blp
+blt25082008	10.13.88.53	61000	blt
+blt25082005	10.13.149.184	61003	blt
+Quick diagram
+
+┌─────────────────────────────────────────┐
+│  OS Root Disk (/)                       │
+│  ├── /etc/kubernetes/    (configs, PKI) │
+│  ├── /var/lib/etcd/      (etcd data)    │
+│  └── /var/lib/kubelet/config.yaml       │
+└─────────────────────────────────────────┘
+
+┌─────────────────────────────────────────┐
+│  /apps  (LVM - AutoVG2/AutoLV1 - XFS)  │
+│  ├── /apps/kubelet/      (pods, state)  │
+│  └── /apps/containerd/   (images, layers)│
+└─────────────────────────────────────────┘
+Notes
+All nodes are control-plane (they run kube-apiserver + etcd)
+Each node runs a single-node etcd (local only, 127.0.0.1:2379)
+Custom port range (61000–61149) is likely for corporate firewall compliance
+Security: full mTLS between all components (apiserver ↔ etcd, apiserver ↔ kubelet)
+
+
+
+
+Simply:-
+Our Kubernetes Setup (All Nodes Same)
+How clusters are built: Using kubeadm
+Container engine: containerd
+Storage Layout
+We have a separate disk (/apps) so containers don't fill up the main OS disk.
+
+
+Main OS disk (/)
+  └── /etc/kubernetes/   ← configs and certificates
+  └── /var/lib/etcd/     ← etcd database
+
+Separate disk (/apps)  ← LVM volume, XFS format
+  └── /apps/kubelet/     ← pod data
+  └── /apps/containerd/  ← container images
+
+What's different from default Kubernetes
+Kubelet stores data at /apps/kubelet instead of /var/lib/kubelet
+Container images stored at /apps/containerd instead of /var/lib/containerd
+API server runs on port 61000/61003/61006 instead of 6443
+NodePort range is 61000–61149 instead of 30000–32767
+
+All nodes checked
+Node	IP	API Port
+bld25082013	10.11.54.45	61006
+bld25082001	10.11.54.45	61006
+blp25082078	10.55.4.226	61003
+blp25082065	10.11.74.102	61000
+blp25082026	10.55.4.220	61003
+blp25082004	10.11.74.82	61000
+blt25082008	10.13.88.53	61000
+blt25082005	10.13.149.184	61003
+All are control-plane nodes (run etcd + API server). All use the same config template — only IPs and ports differ per node.
+
+
